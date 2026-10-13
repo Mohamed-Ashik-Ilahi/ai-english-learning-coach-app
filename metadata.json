@@ -1,0 +1,10 @@
+{
+  "name": "English AI Coach",
+  "description": "Speak English with confidence every day. Practice speaking, vocabulary, grammar, pronunciation, and listening with your personal AI English coach.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
