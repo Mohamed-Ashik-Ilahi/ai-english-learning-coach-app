@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { UserProfile, UserLevel, LearningGoal, DailyMinuteGoal } from '../types';
 import { saveUserProfile, getStoredBackendUrl, saveStoredBackendUrl } from '../services/storageService';
 import { SpeechService } from '../services/speechService';
@@ -38,11 +38,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSaveProfile,
   onOpenAndroidGuide,
 }) => {
-  const [name, setName] = useState<string>(profile.name);
-  const [level, setLevel] = useState<UserLevel>(profile.level);
-  const [goal, setGoal] = useState<LearningGoal>(profile.goal);
-  const [dailyMinutes, setDailyMinutes] = useState<DailyMinuteGoal>(profile.dailyGoalMinutes);
-  const [voiceRate, setVoiceRate] = useState<number>(profile.voiceRate || 1.0);
+  const [name, setName] = useState<string>(profile?.name || 'Friend');
+  const [level, setLevel] = useState<UserLevel>(profile?.level || 'Beginner');
+  const [goal, setGoal] = useState<LearningGoal>(profile?.goal || 'General Fluency');
+  const [dailyMinutes, setDailyMinutes] = useState<DailyMinuteGoal>(profile?.dailyGoalMinutes || 15);
+  const [voiceRate, setVoiceRate] = useState<number>(profile?.voiceRate || 1.0);
   const [backendUrl, setBackendUrl] = useState<string>(getStoredBackendUrl());
   const [isResetConfirmOpen, setIsResetConfirmOpen] = useState<boolean>(false);
 
@@ -59,12 +59,50 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [isTestingMic, setIsTestingMic] = useState<boolean>(false);
   const [micStatus, setMicStatus] = useState<string | null>(null);
 
+  // Voice test state
+  const [isTestingVoice, setIsTestingVoice] = useState<boolean>(false);
+  const [voiceTestError, setVoiceTestError] = useState<string | null>(null);
+
+  // Keep state synced with current profile whenever modal opens or profile changes
+  useEffect(() => {
+    if (isOpen) {
+      setName(profile?.name || 'Friend');
+      setLevel(profile?.level || 'Beginner');
+      setGoal(profile?.goal || 'General Fluency');
+      setDailyMinutes(profile?.dailyGoalMinutes || 15);
+      setVoiceRate(profile?.voiceRate || 1.0);
+      setBackendUrl(getStoredBackendUrl());
+      setTestResult(null);
+      setMicStatus(null);
+      setVoiceTestError(null);
+      setIsTestingVoice(false);
+      setIsResetConfirmOpen(false);
+    } else {
+      SpeechService.stopSpeaking();
+    }
+  }, [isOpen, profile]);
+
+  // Clean up speech synthesis when component unmounts
+  useEffect(() => {
+    return () => {
+      SpeechService.stopSpeaking();
+    };
+  }, []);
+
   if (!isOpen) return null;
 
+  const handleClose = () => {
+    SpeechService.stopSpeaking();
+    setIsTestingVoice(false);
+    onClose();
+  };
+
   const handleSave = () => {
+    SpeechService.stopSpeaking();
+    setIsTestingVoice(false);
     const updated: UserProfile = {
       ...profile,
-      name: name.trim() || 'Friend',
+      name: (name || '').trim() || 'Friend',
       level,
       goal,
       dailyGoalMinutes: dailyMinutes,
@@ -77,14 +115,30 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   const handleResetProgress = () => {
+    SpeechService.stopSpeaking();
     localStorage.clear();
     window.location.reload();
   };
 
   const testVoice = () => {
+    if (isTestingVoice) {
+      SpeechService.stopSpeaking();
+      setIsTestingVoice(false);
+      return;
+    }
+
+    setIsTestingVoice(true);
+    setVoiceTestError(null);
     SpeechService.speak(
       `Hello ${name || 'there'}! This is your English AI Coach speaking at ${voiceRate}x speed.`,
-      voiceRate
+      voiceRate,
+      () => {
+        setIsTestingVoice(false);
+      },
+      (err) => {
+        setIsTestingVoice(false);
+        setVoiceTestError(`Voice error: ${err?.message || 'Playback failed'}`);
+      }
     );
   };
 
@@ -132,7 +186,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
 
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-600 flex items-center justify-center active:scale-95"
           >
             <X className="w-4 h-4" />
@@ -204,11 +258,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <button
                 type="button"
                 onClick={testVoice}
-                className="text-[11px] font-bold text-blue-600 hover:text-blue-800"
+                className={`text-[11px] font-bold px-2.5 py-1 rounded-lg transition-all ${
+                  isTestingVoice
+                    ? 'bg-emerald-600 text-white'
+                    : 'text-blue-600 hover:text-blue-800 bg-blue-50'
+                }`}
               >
-                Test Voice
+                {isTestingVoice ? 'Speaking...' : 'Test Voice'}
               </button>
             </div>
+
+            {voiceTestError && (
+              <p className="text-[11px] text-red-600 font-medium">{voiceTestError}</p>
+            )}
 
             <div className="grid grid-cols-3 gap-2 pt-1">
               {[
@@ -365,7 +427,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <button
             type="button"
             onClick={() => {
-              onClose();
+              handleClose();
               onOpenAndroidGuide();
             }}
             className="w-full p-3.5 bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 rounded-2xl text-left flex items-center justify-between hover:border-emerald-300 transition-colors"
@@ -434,7 +496,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {/* Footer */}
         <div className="p-4 bg-slate-50 border-t border-slate-100 flex items-center justify-between">
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="px-4 py-2.5 text-xs font-semibold text-slate-600 hover:text-slate-900"
           >
             Cancel

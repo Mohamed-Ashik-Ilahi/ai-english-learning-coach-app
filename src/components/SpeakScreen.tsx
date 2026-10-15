@@ -8,6 +8,7 @@ import {
   MicOff,
   Send,
   Volume2,
+  VolumeX,
   Sparkles,
   ArrowLeft,
   RotateCcw,
@@ -42,6 +43,7 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
   const [speechError, setSpeechError] = useState<string | null>(null);
   const [inputMode, setInputMode] = useState<'voice' | 'text'>('voice');
   const [sessionStartTime, setSessionStartTime] = useState<number | null>(null);
+  const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
 
   // Report modal state
   const [conversationReport, setConversationReport] = useState<ConversationReport | null>(null);
@@ -74,14 +76,49 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
 
     // Speak initial welcome message
     setTimeout(() => {
-      SpeechService.speak(scenario.initialMessage, profile.voiceRate || 1.0);
+      setSpeakingMessageId(initialAiMessage.id);
+      SpeechService.speak(
+        scenario.initialMessage,
+        profile.voiceRate || 1.0,
+        () => setSpeakingMessageId((current) => (current === initialAiMessage.id ? null : current)),
+        (err) => {
+          console.warn('[SpeakScreen] Welcome TTS failed:', err);
+          setSpeakingMessageId((current) => (current === initialAiMessage.id ? null : current));
+        }
+      );
     }, 400);
+  };
+
+  // Play / Toggle speech for a specific message
+  const handlePlayMessageSpeech = (messageId: string, textToSpeak: string) => {
+    if (speakingMessageId === messageId) {
+      SpeechService.stopSpeaking();
+      setSpeakingMessageId(null);
+      return;
+    }
+
+    setSpeakingMessageId(messageId);
+    SpeechService.speak(
+      textToSpeak,
+      profile.voiceRate || 1.0,
+      () => {
+        setSpeakingMessageId((current) => (current === messageId ? null : current));
+      },
+      (err) => {
+        console.warn('[SpeakScreen] Message TTS error:', err);
+        setSpeakingMessageId((current) => (current === messageId ? null : current));
+      }
+    );
   };
 
   // Send user message (voice or typed)
   const handleSendMessage = async (textToSend: string) => {
     const text = textToSend.trim();
     if (!text || isLoading || !selectedScenario) return;
+
+    // Stop speaking immediately when user responds
+    SpeechService.stopSpeaking();
+    setSpeakingMessageId(null);
 
     // Stop microphone if currently listening
     if (isListening) {
@@ -126,7 +163,18 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
       setMessages([...newMessages, aiReplyMessage]);
 
       // Automatically speak the AI response
-      SpeechService.speak(response.reply, profile.voiceRate || 1.0);
+      setSpeakingMessageId(aiReplyMessage.id);
+      SpeechService.speak(
+        response.reply,
+        profile.voiceRate || 1.0,
+        () => {
+          setSpeakingMessageId((current) => (current === aiReplyMessage.id ? null : current));
+        },
+        (err) => {
+          console.warn('[SpeakScreen] Auto-speak reply failed:', err);
+          setSpeakingMessageId((current) => (current === aiReplyMessage.id ? null : current));
+        }
+      );
     } catch (e) {
       console.error(e);
       const fallbackMsg: Message = {
@@ -136,7 +184,18 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
         timestamp: Date.now(),
       };
       setMessages([...newMessages, fallbackMsg]);
-      SpeechService.speak(fallbackMsg.text, profile.voiceRate || 1.0);
+      setSpeakingMessageId(fallbackMsg.id);
+      SpeechService.speak(
+        fallbackMsg.text,
+        profile.voiceRate || 1.0,
+        () => {
+          setSpeakingMessageId((current) => (current === fallbackMsg.id ? null : current));
+        },
+        (err) => {
+          console.warn('[SpeakScreen] Auto-speak fallback failed:', err);
+          setSpeakingMessageId((current) => (current === fallbackMsg.id ? null : current));
+        }
+      );
     } finally {
       setIsLoading(false);
     }
@@ -386,11 +445,25 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
                 <p className="font-medium text-[13.5px]">{msg.text}</p>
                 {!isUser && (
                   <button
-                    onClick={() => SpeechService.speak(msg.text, profile.voiceRate || 1.0)}
-                    className="mt-2 text-blue-600 hover:text-blue-800 text-[11px] font-semibold flex items-center gap-1 pt-1 border-t border-slate-100"
+                    onClick={() => handlePlayMessageSpeech(msg.id, msg.text)}
+                    className={`mt-2 text-[11px] font-semibold flex items-center gap-1.5 pt-1.5 border-t border-slate-100 transition-colors ${
+                      speakingMessageId === msg.id
+                        ? 'text-emerald-600 font-bold'
+                        : 'text-blue-600 hover:text-blue-800'
+                    }`}
+                    aria-label={speakingMessageId === msg.id ? 'Stop audio' : 'Listen aloud'}
                   >
-                    <Volume2 className="w-3.5 h-3.5" />
-                    <span>Listen again</span>
+                    {speakingMessageId === msg.id ? (
+                      <>
+                        <VolumeX className="w-3.5 h-3.5 animate-pulse" />
+                        <span>Stop speaking</span>
+                      </>
+                    ) : (
+                      <>
+                        <Volume2 className="w-3.5 h-3.5" />
+                        <span>Listen aloud</span>
+                      </>
+                    )}
                   </button>
                 )}
               </div>
@@ -425,12 +498,24 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
                   <div className="pt-1 flex items-center justify-between">
                     <button
                       onClick={() =>
-                        SpeechService.speak(msg.correction!.better, profile.voiceRate || 1.0)
+                        handlePlayMessageSpeech(
+                          `corr-${msg.id}`,
+                          msg.correction!.better
+                        )
                       }
                       className="text-blue-700 hover:text-blue-900 font-bold text-[11px] flex items-center gap-1 bg-white px-2.5 py-1 rounded-lg border border-amber-200 active:scale-95"
                     >
-                      <Volume2 className="w-3 h-3" />
-                      <span>Hear correct way</span>
+                      {speakingMessageId === `corr-${msg.id}` ? (
+                        <>
+                          <VolumeX className="w-3 h-3 text-emerald-600" />
+                          <span>Stop</span>
+                        </>
+                      ) : (
+                        <>
+                          <Volume2 className="w-3 h-3" />
+                          <span>Hear correct way</span>
+                        </>
+                      )}
                     </button>
                     <span className="text-[10px] text-amber-700 font-medium">
                       {msg.correction.mistakeType}

@@ -1,9 +1,61 @@
-// Speech Recognition and Speech Synthesis helper for Android & modern browsers
+// Speech Recognition and Speech Synthesis helper for Android Capacitor & Web Browsers
+import { Capacitor } from '@capacitor/core';
+import { TextToSpeech } from '@capacitor-community/text-to-speech';
+
+export interface TTSVoiceOption {
+  voiceURI?: string;
+  name: string;
+  lang: string;
+  default?: boolean;
+}
 
 export class SpeechService {
   private static recognition: any = null;
   private static isListening: boolean = false;
-  private static synth: SpeechSynthesis | null = typeof window !== 'undefined' ? window.speechSynthesis : null;
+  private static isCurrentlySpeaking: boolean = false;
+  private static currentUtteranceId: number = 0;
+  private static nativeVoices: TTSVoiceOption[] = [];
+  private static webVoices: SpeechSynthesisVoice[] = [];
+  private static voicesLoaded: boolean = false;
+
+  // Active utterance reference to prevent Chromium garbage collection
+  private static activeUtterance: SpeechSynthesisUtterance | null = null;
+
+  /**
+   * Initializes TTS engines and caches available English voices
+   */
+  public static async init(): Promise<void> {
+    if (typeof window === 'undefined') return;
+
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const result = await TextToSpeech.getSupportedVoices();
+        if (result && result.voices) {
+          this.nativeVoices = result.voices;
+        }
+        this.voicesLoaded = true;
+      } catch (e) {
+        console.warn('[SpeechService] Native getSupportedVoices failed:', e);
+      }
+    } else if ('speechSynthesis' in window) {
+      const loadWebVoices = () => {
+        try {
+          const list = window.speechSynthesis.getVoices();
+          if (list && list.length > 0) {
+            this.webVoices = list;
+            this.voicesLoaded = true;
+          }
+        } catch (e) {
+          console.warn('[SpeechService] Web getVoices error:', e);
+        }
+      };
+
+      loadWebVoices();
+      if (typeof window.speechSynthesis.onvoiceschanged !== 'undefined') {
+        window.speechSynthesis.onvoiceschanged = loadWebVoices;
+      }
+    }
+  }
 
   public static isRecognitionSupported(): boolean {
     if (typeof window === 'undefined') return false;
@@ -14,52 +66,191 @@ export class SpeechService {
   }
 
   public static isSynthesisSupported(): boolean {
-    return typeof window !== 'undefined' && 'speechSynthesis' in window;
+    if (typeof window === 'undefined') return false;
+    if (Capacitor.isNativePlatform()) return true;
+    return 'speechSynthesis' in window;
   }
 
-  public static speak(text: string, rate: number = 1.0, onEnd?: () => void): void {
-    if (!this.synth) return;
+  /**
+   * Checks whether speech synthesis is actively speaking
+   */
+  public static isSpeaking(): boolean {
+    return this.isCurrentlySpeaking;
+  }
 
-    try {
-      this.synth.cancel(); // Stop any currently playing audio
-
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = 'en-US';
-      utterance.rate = Math.max(0.7, Math.min(1.4, rate));
-      utterance.pitch = 1.0;
-
-      // Select an English voice if available
-      const voices = this.synth.getVoices();
-      const englishVoice = voices.find(
-        (v) => (v.lang === 'en-US' || v.lang.startsWith('en')) && (v.name.includes('Natural') || v.name.includes('Google') || v.name.includes('Samantha') || v.name.includes('Alex'))
-      ) || voices.find((v) => v.lang.startsWith('en'));
-
-      if (englishVoice) {
-        utterance.voice = englishVoice;
-      }
-
-      utterance.onend = () => {
-        if (onEnd) onEnd();
-      };
-
-      utterance.onerror = (e) => {
-        console.warn('Speech synthesis error:', e);
-        if (onEnd) onEnd();
-      };
-
-      this.synth.speak(utterance);
-    } catch (e) {
-      console.warn('Speech synthesis failed', e);
+  /**
+   * Reads text aloud.
+   * On native Android / Capacitor, uses the native Android TextToSpeech engine via @capacitor-community/text-to-speech.
+   * On desktop/web browsers, uses window.speechSynthesis with voice caching and GC protection.
+   */
+  public static async speak(
+    text: string,
+    rate: number = 1.0,
+    onEnd?: () => void,
+    onError?: (err: any) => void
+  ): Promise<void> {
+    const trimmed = (text || '').trim();
+    if (!trimmed) {
       if (onEnd) onEnd();
+      return;
     }
+
+    // Stop previous speech before playing new audio
+    this.stopSpeaking();
+
+    // Increment utterance ID to discard callbacks from canceled utterances
+    const utteranceId = ++this.currentUtteranceId;
+    this.isCurrentlySpeaking = true;
+
+    const clampedRate = Math.max(0.6, Math.min(1.5, rate || 1.0));
+
+    // Remove markdown symbols (asterisks, bullet hashes, etc.) for smoother pronunciation
+    const cleanSpokenText = trimmed
+      .replace(/[*_#`~>]/g, '')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // link formatting
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    // PATH 1: Native Android (Capacitor)
+    if (Capacitor.isNativePlatform()) {
+      try {
+        await TextToSpeech.speak({
+          text: cleanSpokenText,
+          lang: 'en-US',
+          rate: clampedRate,
+          pitch: 1.0,
+          volume: 1.0,
+          category: 'ambient',
+        });
+
+        if (this.currentUtteranceId === utteranceId) {
+          this.isCurrentlySpeaking = false;
+          if (onEnd) onEnd();
+        }
+      } catch (err: any) {
+        console.error('[SpeechService] Native TextToSpeech failed:', err);
+        if (this.currentUtteranceId === utteranceId) {
+          this.isCurrentlySpeaking = false;
+          if (onError) onError(err);
+          if (onEnd) onEnd();
+        }
+      }
+      return;
+    }
+
+    // PATH 2: Web Browser (window.speechSynthesis)
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        // Chromium resume workaround
+        if (window.speechSynthesis.paused) {
+          window.speechSynthesis.resume();
+        }
+
+        const utterance = new SpeechSynthesisUtterance(cleanSpokenText);
+        utterance.lang = 'en-US';
+        utterance.rate = clampedRate;
+        utterance.pitch = 1.0;
+
+        // Ensure voices are fetched
+        let voices = this.webVoices;
+        if (!voices || voices.length === 0) {
+          voices = window.speechSynthesis.getVoices();
+          this.webVoices = voices;
+        }
+
+        if (voices && voices.length > 0) {
+          const preferredVoice =
+            voices.find(
+              (v) =>
+                (v.lang === 'en-US' || v.lang === 'en_US') &&
+                (v.name.includes('Google') ||
+                  v.name.includes('Natural') ||
+                  v.name.includes('Samantha') ||
+                  v.name.includes('Daniel') ||
+                  v.name.includes('Alex'))
+            ) ||
+            voices.find((v) => v.lang.startsWith('en')) ||
+            voices[0];
+
+          if (preferredVoice) {
+            utterance.voice = preferredVoice;
+          }
+        }
+
+        utterance.onend = () => {
+          if (this.currentUtteranceId === utteranceId) {
+            this.isCurrentlySpeaking = false;
+            this.activeUtterance = null;
+            if (onEnd) onEnd();
+          }
+        };
+
+        utterance.onerror = (e) => {
+          // If canceled intentionally, do not treat as fatal error
+          if (e.error === 'canceled' || e.error === 'interrupted') {
+            if (this.currentUtteranceId === utteranceId) {
+              this.isCurrentlySpeaking = false;
+              this.activeUtterance = null;
+            }
+            return;
+          }
+          console.warn('[SpeechService] Web speech synthesis error:', e);
+          if (this.currentUtteranceId === utteranceId) {
+            this.isCurrentlySpeaking = false;
+            this.activeUtterance = null;
+            if (onError) onError(e);
+            if (onEnd) onEnd();
+          }
+        };
+
+        // Retain reference on class to avoid GC bug in Chromium
+        this.activeUtterance = utterance;
+        window.speechSynthesis.speak(utterance);
+      } catch (err) {
+        console.error('[SpeechService] Web speak failed:', err);
+        if (this.currentUtteranceId === utteranceId) {
+          this.isCurrentlySpeaking = false;
+          this.activeUtterance = null;
+          if (onError) onError(err);
+          if (onEnd) onEnd();
+        }
+      }
+      return;
+    }
+
+    // PATH 3: Unsupported Environment
+    console.warn('[SpeechService] No speech synthesis engine available.');
+    this.isCurrentlySpeaking = false;
+    if (onError) onError(new Error('Speech synthesis is not supported on this device.'));
+    if (onEnd) onEnd();
   }
 
+  /**
+   * Stops currently playing speech immediately
+   */
   public static stopSpeaking(): void {
-    if (this.synth) {
-      this.synth.cancel();
+    this.currentUtteranceId++;
+    this.isCurrentlySpeaking = false;
+    this.activeUtterance = null;
+
+    if (Capacitor.isNativePlatform()) {
+      TextToSpeech.stop().catch((e) => {
+        // ignore stop errors
+      });
+    }
+
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // ignore
+      }
     }
   }
 
+  /**
+   * Starts microphone recognition (SpeechRecognition)
+   */
   public static startListening(
     onResult: (transcript: string, isFinal: boolean) => void,
     onError: (errorMsg: string) => void,
@@ -69,6 +260,9 @@ export class SpeechService {
       onError('Speech recognition is not supported in this browser. You can type your response instead!');
       return false;
     }
+
+    // When starting listening, mute any active speech output so audio won't feedback into mic
+    this.stopSpeaking();
 
     try {
       if (this.recognition && this.isListening) {
@@ -110,7 +304,7 @@ export class SpeechService {
       };
 
       recognition.onerror = (event: any) => {
-        console.warn('Speech recognition error:', event.error);
+        console.warn('[SpeechService] Recognition error:', event.error);
         this.isListening = false;
         if (onStatusChange) onStatusChange(false);
 
@@ -146,7 +340,7 @@ export class SpeechService {
         stream.getTracks().forEach((t) => t.stop());
         return true;
       } catch (e) {
-        console.warn('Microphone permission request failed:', e);
+        console.warn('[SpeechService] Microphone permission request failed:', e);
         return false;
       }
     }
@@ -167,4 +361,11 @@ export class SpeechService {
   public static getIsListening(): boolean {
     return this.isListening;
   }
+}
+
+// Warm up voices on import
+if (typeof window !== 'undefined') {
+  SpeechService.init().catch((err) => {
+    console.debug('[SpeechService] Initial voice warmup completed with notice:', err);
+  });
 }

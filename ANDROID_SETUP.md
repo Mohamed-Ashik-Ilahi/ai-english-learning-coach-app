@@ -34,11 +34,18 @@ java.lang.SecurityException: Package com.englishaicoach.app has not requested pe
    - Microphone permission is requested on-demand when the user activates voice input (avoiding annoying popups on app launch).
 
 3. **`src/services/speechService.ts` & `src/components/SpeakScreen.tsx`**:
+   - Upgraded to dual-engine Speech Synthesis: uses `@capacitor-community/text-to-speech` for native Android Text-to-Speech (calling Android OS TTS directly), and `window.speechSynthesis` on web browsers.
+   - Fixed Android WebView TTS silence: Android WebViews do not bundle or forward Web Speech API `window.speechSynthesis` calls to Android TTS. The Capacitor Text-to-Speech plugin bridges directly to Android's `TextToSpeech` service.
+   - Added interactive speaker toggle buttons on AI answers: taps read the answer aloud with active audio indicators, allow stopping playback mid-speech, clean markdown symbols before vocalization, and prevent overlapping duplicate audio.
+   - Automatically reads the incoming AI response while respecting user voice rate and stopping speech when the user taps to record a voice message.
    - Made the microphone activation asynchronous: checks and triggers permission before starting speech recognition.
    - Added graceful error handling and an in-app **"Retry / Request Permission"** button if microphone access was initially denied.
-   - Added automatic fallback to text typing mode if speech recognition is unavailable on the device's WebView.
 
-4. **`package.json`**:
+4. **`android/app/src/main/AndroidManifest.xml`**:
+   - Added `<queries><intent><action android:name="android.intent.action.TTS_SERVICE" /></intent></queries>` to guarantee Android 11+ (API 30+) package visibility for device TTS engines (Google Speech Services, Samsung TTS, etc.).
+
+5. **`package.json`**:
+   - Added `@capacitor-community/text-to-speech` (v8.0.2, aligned with Capacitor 8).
    - Added `npm run build:android` to compile the Vite web app and sync assets to Capacitor in one command.
    - Added `npm run cap:open` to launch Android Studio directly.
 

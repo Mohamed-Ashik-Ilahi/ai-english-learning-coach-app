@@ -11,6 +11,13 @@
     <!-- Optional hardware features -->
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
+    <!-- Queries for Android 11+ (API 30+) Text-to-Speech engine package visibility -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
