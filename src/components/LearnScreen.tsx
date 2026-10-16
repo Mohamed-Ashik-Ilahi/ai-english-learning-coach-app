@@ -55,7 +55,7 @@ export const LearnScreen: React.FC<LearnScreenProps> = ({
   const handleFetchNewLesson = async () => {
     setIsLoadingLesson(true);
     try {
-      const lesson = await geminiService.getDailyLesson(profile.level);
+      const lesson = await geminiService.getDailyLesson(profile.level, undefined, true);
       onUpdateDailyLesson(lesson);
       setQuizAnswers({});
       setQuizSubmitted(false);

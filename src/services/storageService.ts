@@ -1,4 +1,4 @@
-import { UserProfile, Scenario, Word, GrammarExercise, PronunciationItem } from '../types';
+import { UserProfile, Scenario, Word, GrammarExercise, PronunciationItem, DailyLesson, UserLevel } from '../types';
 
 const PROFILE_KEY = 'english_ai_coach_profile';
 const VOCAB_KEY = 'english_ai_coach_vocab';
@@ -626,3 +626,27 @@ export function saveStoredBackendUrl(url: string): void {
     console.error('Failed to save backend url', e);
   }
 }
+const DAILY_LESSON_CACHE_PREFIX = 'english_ai_coach_cached_lesson_';
+
+export function loadCachedDailyLesson(level: UserLevel): DailyLesson | null {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const key = `${DAILY_LESSON_CACHE_PREFIX}${level}_${today}`;
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    return JSON.parse(raw) as DailyLesson;
+  } catch {
+    return null;
+  }
+}
+
+export function saveCachedDailyLesson(lesson: DailyLesson, level: UserLevel): void {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const key = `${DAILY_LESSON_CACHE_PREFIX}${level}_${today}`;
+    localStorage.setItem(key, JSON.stringify(lesson));
+  } catch (e) {
+    console.warn('Failed to cache daily lesson:', e);
+  }
+}
+

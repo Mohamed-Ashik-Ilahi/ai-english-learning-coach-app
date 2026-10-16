@@ -41,9 +41,13 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
   const [isListening, setIsListening] = useState<boolean>(false);
   const [speechTranscript, setSpeechTranscript] = useState<string>('');
   const [speechError, setSpeechError] = useState<string | null>(null);
+  const [chatError, setChatError] = useState<{ message: string; failedText: string } | null>(null);
   const [inputMode, setInputMode] = useState<'voice' | 'text'>('voice');
   const [sessionStartTime, setSessionStartTime] = useState<number | null>(null);
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
+
+  // In-flight guard to prevent duplicate submissions
+  const isSubmittingRef = useRef<boolean>(false);
 
   // Report modal state
   const [conversationReport, setConversationReport] = useState<ConversationReport | null>(null);
@@ -114,7 +118,10 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
   // Send user message (voice or typed)
   const handleSendMessage = async (textToSend: string) => {
     const text = textToSend.trim();
-    if (!text || isLoading || !selectedScenario) return;
+    if (!text || isLoading || isSubmittingRef.current || !selectedScenario) return;
+
+    // Prevent duplicate simultaneous submissions
+    isSubmittingRef.current = true;
 
     // Stop speaking immediately when user responds
     SpeechService.stopSpeaking();
@@ -137,6 +144,7 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
     setMessages(newMessages);
     setInputText('');
     setSpeechTranscript('');
+    setChatError(null);
     setIsLoading(true);
 
     try {
@@ -175,34 +183,78 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
           setSpeakingMessageId((current) => (current === aiReplyMessage.id ? null : current));
         }
       );
-    } catch (e) {
-      console.error(e);
-      const fallbackMsg: Message = {
-        id: `ai-${Date.now()}`,
-        sender: 'model',
-        text: "That was very clear! Could you tell me more about that?",
-        timestamp: Date.now(),
-      };
-      setMessages([...newMessages, fallbackMsg]);
-      setSpeakingMessageId(fallbackMsg.id);
-      SpeechService.speak(
-        fallbackMsg.text,
-        profile.voiceRate || 1.0,
-        () => {
-          setSpeakingMessageId((current) => (current === fallbackMsg.id ? null : current));
-        },
-        (err) => {
-          console.warn('[SpeakScreen] Auto-speak fallback failed:', err);
-          setSpeakingMessageId((current) => (current === fallbackMsg.id ? null : current));
-        }
-      );
+    } catch (e: any) {
+      console.warn('[SpeakScreen] Send message failed:', e);
+      // Keep conversation intact and display actionable retry option
+      setChatError({
+        message: 'Coach Alex is taking longer than usual to respond. Please check your connection.',
+        failedText: text,
+      });
     } finally {
       setIsLoading(false);
+      isSubmittingRef.current = false;
+    }
+  };
+
+  // Retry sending the last failed user message without duplicating it in the UI
+  const handleRetryMessage = async (failedText: string) => {
+    if (isLoading || isSubmittingRef.current || !selectedScenario) return;
+    setChatError(null);
+    isSubmittingRef.current = true;
+    setIsLoading(true);
+
+    try {
+      const response = await geminiService.sendChatMessage(
+        messages,
+        selectedScenario,
+        profile.level,
+        profile.mistakeHistory
+      );
+
+      if (response.hasCorrection && response.correction) {
+        const lastUserMsg = [...messages].reverse().find((m) => m.sender === 'user');
+        if (lastUserMsg) {
+          lastUserMsg.correction = response.correction;
+          recordMistake(response.correction);
+        }
+      }
+
+      const aiReplyMessage: Message = {
+        id: `ai-${Date.now()}`,
+        sender: 'model',
+        text: response.reply,
+        timestamp: Date.now(),
+      };
+
+      setMessages((prev) => [...prev, aiReplyMessage]);
+
+      setSpeakingMessageId(aiReplyMessage.id);
+      SpeechService.speak(
+        response.reply,
+        profile.voiceRate || 1.0,
+        () => {
+          setSpeakingMessageId((current) => (current === aiReplyMessage.id ? null : current));
+        },
+        (err) => {
+          console.warn('[SpeakScreen] Auto-speak retry reply failed:', err);
+          setSpeakingMessageId((current) => (current === aiReplyMessage.id ? null : current));
+        }
+      );
+    } catch (e: any) {
+      console.warn('[SpeakScreen] Retry chat failed:', e);
+      setChatError({
+        message: 'Could not connect to Coach Alex. Please tap Retry or verify your network.',
+        failedText,
+      });
+    } finally {
+      setIsLoading(false);
+      isSubmittingRef.current = false;
     }
   };
 
   // Toggle voice recognition
   const handleToggleVoice = async () => {
+    if (isLoading || isSubmittingRef.current) return;
     setSpeechError(null);
     if (isListening) {
       SpeechService.stopListening();
@@ -527,11 +579,43 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
           );
         })}
 
-        {/* Loading Indicator */}
+        {/* Smooth Typing/Thinking Indicator */}
         {isLoading && (
-          <div className="flex items-center gap-2 text-xs text-slate-500 bg-white px-3 py-2 rounded-2xl border border-slate-100 w-fit">
-            <span className="w-2 h-2 rounded-full bg-blue-600 animate-ping" />
-            <span className="font-medium">Coach Alex is thinking...</span>
+          <div className="flex items-start gap-2 animate-in fade-in duration-200">
+            <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-blue-600 to-indigo-600 text-white flex items-center justify-center text-xs font-bold shrink-0 shadow-xs">
+              A
+            </div>
+            <div className="bg-white border border-slate-200/80 rounded-2xl rounded-tl-xs px-3.5 py-2.5 shadow-xs flex items-center gap-2">
+              <div className="flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-600 animate-bounce" style={{ animationDelay: '0ms' }} />
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-bounce" style={{ animationDelay: '150ms' }} />
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+              </div>
+              <span className="text-xs font-medium text-slate-600">Coach Alex is thinking...</span>
+            </div>
+          </div>
+        )}
+
+        {/* Actionable Chat Error State with Retry Button */}
+        {chatError && (
+          <div className="p-3.5 bg-amber-50/90 border border-amber-200 rounded-2xl text-xs text-amber-900 space-y-2 animate-in fade-in duration-200">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <p className="font-semibold">{chatError.message}</p>
+                <p className="text-[11px] text-amber-700 mt-0.5">Your message is preserved above. Tap Retry to ask Coach Alex again.</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 pl-6">
+              <button
+                onClick={() => handleRetryMessage(chatError.failedText)}
+                disabled={isLoading}
+                className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 active:scale-95 text-white font-bold rounded-xl text-xs shadow-xs transition-colors flex items-center gap-1.5 disabled:opacity-50"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Retry Message</span>
+              </button>
+            </div>
           </div>
         )}
 
@@ -603,8 +687,11 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
             <div className="relative flex items-center justify-center">
               <button
                 onClick={handleToggleVoice}
+                disabled={isLoading}
                 className={`w-20 h-20 rounded-full flex items-center justify-center transition-all duration-300 shadow-xl active:scale-90 ${
-                  isListening
+                  isLoading
+                    ? 'bg-slate-300 text-slate-400 cursor-not-allowed shadow-none'
+                    : isListening
                     ? 'bg-red-500 text-white mic-active-pulse shadow-red-500/40 ring-4 ring-red-200'
                     : 'bg-gradient-to-tr from-blue-600 to-indigo-600 text-white shadow-blue-500/30 hover:scale-105'
                 }`}

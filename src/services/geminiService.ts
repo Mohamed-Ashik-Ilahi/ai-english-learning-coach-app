@@ -1,5 +1,5 @@
 import { Correction, ConversationReport, DailyLesson, ListeningExercise, ReadingPassage, UserLevel, Message, Scenario } from '../types';
-import { getStoredBackendUrl } from './storageService';
+import { getStoredBackendUrl, loadCachedDailyLesson, saveCachedDailyLesson } from './storageService';
 
 /**
  * Resolves the active backend URL for API requests.
@@ -93,25 +93,32 @@ export const geminiService = {
     hasCorrection: boolean;
     correction?: Correction;
   }> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
+
     try {
       const res = await fetch(buildApiUrl('/api/gemini/chat'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages, scenario, userLevel, currentMistakes }),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
 
       if (!res.ok) {
-        throw new Error(`Server returned ${res.status}`);
+        throw new Error(`Server returned HTTP ${res.status}`);
       }
 
-      return await res.json();
-    } catch (error) {
-      console.warn('Using client fallback for chat:', error);
-      const lastMsg = messages[messages.length - 1]?.text || '';
-      return {
-        reply: "That's very well expressed! Could you give me an example or tell me what happened next?",
-        hasCorrection: false,
-      };
+      const data = await res.json();
+      return data;
+    } catch (error: any) {
+      clearTimeout(timeoutId);
+      const isTimeout = error.name === 'AbortError';
+      const errorMsg = isTimeout
+        ? 'Request timed out. Please check your network and try again.'
+        : error.message || 'Connection failed';
+      console.warn('[geminiService] sendChatMessage failed:', errorMsg);
+      throw new Error(errorMsg);
     }
   },
 
@@ -171,17 +178,32 @@ export const geminiService = {
     }
   },
 
-  async getDailyLesson(userLevel: UserLevel, topic?: string): Promise<DailyLesson> {
+  async getDailyLesson(userLevel: UserLevel, topic?: string, forceRefresh: boolean = false): Promise<DailyLesson> {
+    if (!topic && !forceRefresh) {
+      const cached = loadCachedDailyLesson(userLevel);
+      if (cached) return cached;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
+
     try {
       const res = await fetch(buildApiUrl('/api/gemini/daily-lesson'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userLevel, topic }),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
 
       if (!res.ok) throw new Error('Lesson fetch failed');
-      return await res.json();
+      const data: DailyLesson = await res.json();
+      if (!topic) {
+        saveCachedDailyLesson(data, userLevel);
+      }
+      return data;
     } catch (error) {
+      clearTimeout(timeoutId);
       return {
         topic: 'Talking About Your Morning Routine',
         themeDescription: 'Master 5 practical words to describe how you start your morning smoothly.',

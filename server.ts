@@ -2,6 +2,7 @@ import express from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
 
@@ -69,11 +70,14 @@ const ai = new GoogleGenAI({
   },
 });
 
-const PRIMARY_MODEL = 'gemini-3.8-flash';
-const FALLBACK_MODEL = 'gemini-3.1-flash-lite';
+const PRIMARY_MODEL = process.env.GEMINI_MODEL || 'gemini-3-flash-preview';
+const FALLBACK_MODELS = ['gemini-3.1-flash-lite-preview', 'gemini-3.8-flash'];
 
 async function generateContentWithRetry(params: any) {
-  const modelsToTry = [PRIMARY_MODEL, FALLBACK_MODEL];
+  const modelsToTry = [
+    PRIMARY_MODEL,
+    ...FALLBACK_MODELS.filter((m) => m !== PRIMARY_MODEL),
+  ];
   let lastError: any = null;
 
   for (let i = 0; i < modelsToTry.length; i++) {
@@ -85,9 +89,13 @@ async function generateContentWithRetry(params: any) {
       });
     } catch (err: any) {
       lastError = err;
+      // Do not retry client 4xx errors (bad prompt structure or invalid params)
+      if (err?.status >= 400 && err?.status < 500 && err?.status !== 429) {
+        throw err;
+      }
       // If there is another model to try, wait briefly before retrying
       if (i < modelsToTry.length - 1) {
-        await new Promise((r) => setTimeout(r, 600));
+        await new Promise((r) => setTimeout(r, 400));
       }
     }
   }
@@ -109,7 +117,7 @@ function cleanJsonText(raw: string): string {
 // 1. Conversation Chat Endpoint
 app.post('/api/gemini/chat', async (req, res) => {
   try {
-    const { messages, scenario, userLevel = 'Intermediate', currentMistakes = [] } = req.body;
+    const { messages = [], scenario, userLevel = 'Intermediate', currentMistakes = [] } = req.body;
     const lastUserMessage = messages[messages.length - 1]?.text || '';
 
     const systemInstruction = `You are a warm, encouraging, and natural AI English Teacher named "Coach Alex".
@@ -129,9 +137,13 @@ Instructions:
    - "mistakeType": e.g. "Past Tense", "Preposition", "Subject-Verb Agreement", "Vocabulary Choice", or "None".
 4. If what the user said was already natural and correct, set "hasCorrection" to false and offer a brief encouraging compliment.`;
 
-    let contents = messages.map((m: any) => ({
+    // Limit conversation history to latest 10 messages to minimize latency and token overhead
+    const MAX_HISTORY = 10;
+    const recentMessages = Array.isArray(messages) ? messages.slice(-MAX_HISTORY) : [];
+
+    let contents = recentMessages.map((m: any) => ({
       role: m.sender === 'user' ? 'user' : 'model',
-      parts: [{ text: m.text }],
+      parts: [{ text: String(m.text || '').trim() }],
     }));
 
     // Gemini API requires conversational contents to start with a user message
@@ -192,9 +204,10 @@ Instructions:
       } : undefined,
     });
   } catch (_error: any) {
-    return res.json({
-      reply: "That's a great thought! Could you explain that in another way or give me an example?",
-      hasCorrection: false,
+    console.error('[server] /api/gemini/chat error:', _error?.message || _error);
+    return res.status(500).json({
+      error: 'AI Coach is temporarily unavailable. Please retry.',
+      details: _error?.message || 'Server error',
     });
   }
 });
@@ -796,12 +809,36 @@ function getMockReading(level: string) {
 
 // Full-stack Vite setup: mount Vite middlewares in dev, serve static in production
 async function startServer() {
-  if (process.env.NODE_ENV === 'production') {
-    app.use(express.static(path.resolve(__dirname, 'dist')));
-    app.get('*', (req, res) => {
-      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+  const isServerJs = __filename.endsWith('server.js');
+  const isProduction = process.env.NODE_ENV === 'production' || isServerJs;
+  const distPath = path.resolve(__dirname, 'dist');
+
+  // 404 catch-all for any unhandled /api/* routes (ensures API callers never receive HTML)
+  app.all('/api/*', (req, res) => {
+    res.status(404).json({
+      error: 'API endpoint not found',
+      path: req.originalUrl,
+      method: req.method,
     });
+  });
+
+  if (isProduction) {
+    if (fs.existsSync(distPath)) {
+      // Serve static frontend assets
+      app.use(express.static(distPath));
+
+      // SPA fallback: only handle non-API routes with index.html
+      app.get('*', (req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+      });
+    } else {
+      console.warn(`[English AI Coach] Warning: 'dist' folder not found at ${distPath}. Run 'npm run build' to generate frontend assets.`);
+      app.get('*', (_req, res) => {
+        res.status(503).send('Application frontend is building or dist folder is missing. Please run `npm run build`.');
+      });
+    }
   } else {
+    // Development mode with Vite HMR/middleware
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -810,9 +847,25 @@ async function startServer() {
     app.use(vite.middlewares);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[English AI Coach] Server listening on http://0.0.0.0:${PORT}`);
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[English AI Coach] Server listening on http://0.0.0.0:${PORT} (env: ${process.env.NODE_ENV || 'development'})`);
+  });
+
+  server.on('error', (err: any) => {
+    console.error('[English AI Coach] Server error:', err);
+  });
+
+  process.on('SIGTERM', () => {
+    console.log('[English AI Coach] SIGTERM signal received. Closing server gracefully...');
+    server.close(() => {
+      console.log('[English AI Coach] HTTP server closed.');
+      process.exit(0);
+    });
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('[English AI Coach] Fatal error starting server:', err);
+  process.exit(1);
+});
+

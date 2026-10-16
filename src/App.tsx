@@ -7,6 +7,7 @@ import {
   loadUserProfile,
   saveUserProfile,
   loadVocabulary,
+  loadCachedDailyLesson,
 } from './services/storageService';
 import { geminiService } from './services/geminiService';
 import { BottomNav, TabType } from './components/BottomNav';
@@ -48,13 +49,18 @@ export default function App() {
       SplashScreen.hide().catch(() => {});
     }
 
-    // Fetch initial daily lesson
-    geminiService
-      .getDailyLesson(p.level)
-      .then((lesson) => {
-        setDailyLesson(lesson);
-      })
-      .catch((e) => console.error(e));
+    // Load cached daily lesson synchronously to eliminate startup lag
+    const cachedLesson = loadCachedDailyLesson(p.level);
+    if (cachedLesson) {
+      setDailyLesson(cachedLesson);
+    } else {
+      geminiService
+        .getDailyLesson(p.level)
+        .then((lesson) => {
+          setDailyLesson(lesson);
+        })
+        .catch((e) => console.error(e));
+    }
   }, [isNative]);
 
   const handleUpdateProfile = () => {
