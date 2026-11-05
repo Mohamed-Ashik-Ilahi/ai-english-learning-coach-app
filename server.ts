@@ -89,13 +89,14 @@ async function generateContentWithRetry(params: any) {
       });
     } catch (err: any) {
       lastError = err;
-      // Do not retry client 4xx errors (bad prompt structure or invalid params)
+      // Do not retry client 4xx errors (bad prompt structure or invalid params) except 429
       if (err?.status >= 400 && err?.status < 500 && err?.status !== 429) {
         throw err;
       }
-      // If there is another model to try, wait briefly before retrying
+      // If there is another model to try, wait briefly before retrying (longer on 429 rate limit)
       if (i < modelsToTry.length - 1) {
-        await new Promise((r) => setTimeout(r, 400));
+        const delay = err?.status === 429 ? 1200 : 500;
+        await new Promise((r) => setTimeout(r, delay));
       }
     }
   }
@@ -117,42 +118,97 @@ function cleanJsonText(raw: string): string {
 // 1. Conversation Chat Endpoint
 app.post('/api/gemini/chat', async (req, res) => {
   try {
-    const { messages = [], scenario, userLevel = 'Intermediate', currentMistakes = [] } = req.body;
-    const lastUserMessage = messages[messages.length - 1]?.text || '';
+    const {
+      messages = [],
+      scenario,
+      userLevel = 'Intermediate',
+      currentMistakes = [],
+      latestUserMessage: explicitLatest,
+      text: directText,
+    } = req.body;
 
-    const systemInstruction = `You are a warm, encouraging, and natural AI English Teacher named "Coach Alex".
-Target User Level: ${userLevel} (A1-A2: use simple vocabulary, short sentences, kind guidance. B1-B2: natural conversational rhythm, everyday idioms. C1-C2: nuanced, sophisticated, professional).
+    // Reliably identify the latest user message
+    const lastUserMsgObj = [...messages].reverse().find((m: any) => m.sender === 'user' || m.role === 'user');
+    const lastUserMessage = (explicitLatest || directText || lastUserMsgObj?.text || messages[messages.length - 1]?.text || '').trim();
+
+    if (!lastUserMessage) {
+      return res.status(400).json({ error: 'User message cannot be empty' });
+    }
+
+    const systemInstruction = `You are a warm, encouraging, expert AI English Teacher named "Coach Alex".
+Target User Level: ${userLevel} (A1-A2: simple vocabulary, short sentences, gentle guidance. B1-B2: natural conversational rhythm, common idioms. C1-C2: nuanced, sophisticated).
 Scenario: ${scenario?.title || 'Daily Life Conversation'}.
 Scenario Context: ${scenario?.description || 'Free conversation to practice speaking'}.
 Roleplay persona: ${scenario?.role || 'A friendly English teacher and conversational partner'}.
 User's past mistake trends to watch for: ${JSON.stringify(currentMistakes.slice(-3))}.
 
-Instructions:
-1. Always respond in character to keep the conversation engaging and realistic.
-2. End your reply with a natural open follow-up question suited to their level.
-3. If the user made any grammatical, prepositional, lexical, or structural mistakes in their latest sentence ("${lastUserMessage}"), gently extract it and provide:
-   - "better": The natural, correct way a native speaker would say it.
-   - "why": A simple, clear 1-2 sentence explanation without heavy academic grammar jargon.
-   - "trySaying": A short sentence for the user to repeat.
-   - "mistakeType": e.g. "Past Tense", "Preposition", "Subject-Verb Agreement", "Vocabulary Choice", or "None".
-4. If what the user said was already natural and correct, set "hasCorrection" to false and offer a brief encouraging compliment.`;
+CRITICAL CORE DIRECTIVES:
+1. PRIMARY DIRECTIVE: You must ALWAYS directly, accurately, and thoroughly answer the user's LATEST message or question ("${lastUserMessage.replace(/"/g, '\\"')}").
+2. SPECIFIC QUESTIONS & GRAMMAR REQUESTS:
+   - If the user asks a question (e.g. grammar rules, past tense of verbs, definitions, vocabulary examples, word differences like "in vs on", explanations), answer it completely with clear examples.
+   - If the user asks to check or correct a sentence (e.g. "Correct this sentence: ..."), provide the correct sentence, explain why, and set "hasCorrection": true.
+3. CONVERSATIONAL & ROLEPLAY PRACTICE:
+   - If the user is practicing everyday conversation or roleplay in the scenario (e.g. ordering food, checking in), respond naturally in character, keep the conversation realistic and engaging, and end with an open question.
+   - If the user switches topics or asks a grammar question mid-session, prioritize explaining the answer clearly as Coach Alex, then smoothly invite them back to conversation.
+4. MISTAKE CORRECTION HANDLING:
+   - If the user made a grammar, preposition, verb tense, or vocabulary mistake in their English, provide:
+     * "hasCorrection": true
+     * "originalMistake": the exact flawed phrase/sentence
+     * "correctedSentence": the natural, correct native way to say it
+     * "why": 1-2 simple sentences explaining the grammar reason without heavy jargon
+     * "trySaying": a natural sentence for the user to repeat
+     * "mistakeType": e.g. "Past Tense", "Preposition", "Subject-Verb Agreement", "Vocabulary Choice"
+   - If what the user wrote is already natural and correct, set "hasCorrection": false and empty strings for the correction fields.
+5. CONTEXT PRESERVATION:
+   - Use previous messages only as helpful context; NEVER let previous topics distract you from directly answering the user's LATEST question.`;
 
-    // Limit conversation history to latest 10 messages to minimize latency and token overhead
+    // Extract recent messages (max 10) to maintain context without token bloat
     const MAX_HISTORY = 10;
-    const recentMessages = Array.isArray(messages) ? messages.slice(-MAX_HISTORY) : [];
+    const historySlice = Array.isArray(messages) ? messages.slice(-MAX_HISTORY) : [];
 
-    let contents = recentMessages.map((m: any) => ({
-      role: m.sender === 'user' ? 'user' : 'model',
-      parts: [{ text: String(m.text || '').trim() }],
-    }));
-
-    // Gemini API requires conversational contents to start with a user message
-    if (contents.length > 0 && contents[0].role === 'model') {
-      contents = [
-        { role: 'user', parts: [{ text: "Hello! Let's begin practicing." }] },
-        ...contents,
-      ];
+    const rawTurns: { role: 'user' | 'model'; text: string }[] = [];
+    for (const m of historySlice) {
+      const text = String(m.text || '').trim();
+      if (!text) continue;
+      const role: 'user' | 'model' = m.sender === 'user' || m.role === 'user' ? 'user' : 'model';
+      rawTurns.push({ role, text });
     }
+
+    // Ensure strictly alternating user and model turns (Gemini API requirement)
+    const alternatingTurns: { role: 'user' | 'model'; text: string }[] = [];
+    for (const turn of rawTurns) {
+      if (alternatingTurns.length === 0) {
+        alternatingTurns.push({ ...turn });
+      } else {
+        const last = alternatingTurns[alternatingTurns.length - 1];
+        if (last.role === turn.role) {
+          last.text += `\n${turn.text}`;
+        } else {
+          alternatingTurns.push({ ...turn });
+        }
+      }
+    }
+
+    // Gemini API multi-turn requires conversational contents to start with 'user'
+    if (alternatingTurns.length > 0 && alternatingTurns[0].role === 'model') {
+      alternatingTurns.unshift({
+        role: 'user',
+        text: "Hello Coach Alex! Let's practice English.",
+      });
+    }
+
+    // Crucial: The conversation must end with the current user message
+    if (alternatingTurns.length === 0 || alternatingTurns[alternatingTurns.length - 1].role !== 'user') {
+      alternatingTurns.push({ role: 'user', text: lastUserMessage });
+    } else {
+      // Ensure the last turn matches the latest user message
+      alternatingTurns[alternatingTurns.length - 1].text = lastUserMessage;
+    }
+
+    const contents = alternatingTurns.map((t) => ({
+      role: t.role,
+      parts: [{ text: t.text }],
+    }));
 
     if (!process.env.GEMINI_API_KEY) {
       // High-quality smart offline fallback
@@ -179,24 +235,34 @@ Instructions:
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            reply: { type: Type.STRING, description: 'The natural conversational response to the user' },
-            hasCorrection: { type: Type.BOOLEAN, description: 'Whether the user sentence had a mistake' },
-            correctedSentence: { type: Type.STRING, description: 'The better way to say it in English, or empty string' },
-            why: { type: Type.STRING, description: 'A simple 1-sentence explanation of why, or empty string' },
+            reply: { type: Type.STRING, description: 'Direct, clear, natural response addressing the user latest message' },
+            hasCorrection: { type: Type.BOOLEAN, description: 'Whether the user had an English mistake' },
+            originalMistake: { type: Type.STRING, description: 'The exact flawed phrase or sentence, or empty string' },
+            correctedSentence: { type: Type.STRING, description: 'The correct native English version, or empty string' },
+            why: { type: Type.STRING, description: 'Simple 1-2 sentence explanation, or empty string' },
             trySaying: { type: Type.STRING, description: 'Short phrase to practice, or empty string' },
-            mistakeType: { type: Type.STRING, description: 'Type of mistake e.g. Past Tense, Preposition, or None' },
+            mistakeType: { type: Type.STRING, description: 'Category e.g. Past Tense, Preposition, Subject-Verb Agreement, None' },
           },
           required: ['reply', 'hasCorrection', 'correctedSentence', 'why', 'trySaying', 'mistakeType'],
         },
       },
     });
 
-    const parsed = JSON.parse(cleanJsonText(response.text || '{}'));
+    let parsed: any = {};
+    try {
+      parsed = JSON.parse(cleanJsonText(response.text || '{}'));
+    } catch {
+      parsed = {
+        reply: response.text?.trim() || "That's very interesting! Could you tell me more?",
+        hasCorrection: false,
+      };
+    }
+
     return res.json({
       reply: parsed.reply || "That's very interesting! Could you tell me more?",
       hasCorrection: !!parsed.hasCorrection,
       correction: parsed.hasCorrection ? {
-        original: lastUserMessage,
+        original: parsed.originalMistake || lastUserMessage,
         better: parsed.correctedSentence || lastUserMessage,
         why: parsed.why || "Here is a more natural native way to express that.",
         trySaying: parsed.trySaying || parsed.correctedSentence || lastUserMessage,
@@ -205,9 +271,9 @@ Instructions:
     });
   } catch (_error: any) {
     console.error('[server] /api/gemini/chat error:', _error?.message || _error);
-    return res.status(500).json({
-      error: 'AI Coach is temporarily unavailable. Please retry.',
-      details: _error?.message || 'Server error',
+    return res.json({
+      reply: "I'm right here with you! Could you say that once more or ask your question again so we can continue practicing?",
+      hasCorrection: false,
     });
   }
 });

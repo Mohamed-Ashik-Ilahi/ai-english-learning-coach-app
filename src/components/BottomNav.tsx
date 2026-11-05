@@ -19,8 +19,8 @@ export const BottomNav: React.FC<BottomNavProps> = ({ currentTab, onSelectTab })
 
   return (
     <nav
-      className="fixed sm:absolute bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200/80 shadow-[0_-4px_20px_rgba(0,0,0,0.03)]"
-      style={{ paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 6px)' }}
+      className="shrink-0 z-30 bg-white/95 backdrop-blur-md border-t border-slate-200/80 shadow-[0_-4px_20px_rgba(0,0,0,0.03)] w-full"
+      style={{ paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 8px)' }}
     >
       <div className="max-w-md mx-auto px-3 py-1.5 flex items-center justify-around">
         {tabs.map((tab) => {

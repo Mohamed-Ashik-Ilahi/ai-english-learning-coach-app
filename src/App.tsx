@@ -19,12 +19,17 @@ import { ProgressScreen } from './components/ProgressScreen';
 import { OnboardingModal } from './components/OnboardingModal';
 import { SettingsModal } from './components/SettingsModal';
 import { AndroidBuildGuideModal } from './components/AndroidBuildGuideModal';
+import { MobileNavDrawer } from './components/MobileNavDrawer';
 import { Smartphone, Wifi, Battery, Sparkles } from 'lucide-react';
 
 export default function App() {
   const [profile, setProfile] = useState<UserProfile>(loadUserProfile());
   const [currentTab, setCurrentTab] = useState<TabType>('home');
   const [dailyLesson, setDailyLesson] = useState<DailyLesson | null>(null);
+
+  // Track active AI chat conversation to prevent bottom nav from overlapping input
+  const [isChatActive, setIsChatActive] = useState<boolean>(false);
+  const [isMobileNavOpen, setIsMobileNavOpen] = useState<boolean>(false);
 
   const isNative = Capacitor.isNativePlatform();
 
@@ -89,6 +94,9 @@ export default function App() {
     if (extra?.section) {
       setPracticeInitialSection(extra.section);
     }
+    if (tab !== 'speak') {
+      setIsChatActive(false);
+    }
     setCurrentTab(tab);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -127,7 +135,13 @@ export default function App() {
         )}
 
         {/* Main Content Area */}
-        <main className="flex-1 overflow-y-auto">
+        <main
+          className={`flex-1 relative ${
+            isChatActive && currentTab === 'speak'
+              ? 'overflow-hidden flex flex-col'
+              : 'overflow-y-auto'
+          }`}
+        >
           {currentTab === 'home' && (
             <HomeScreen
               profile={profile}
@@ -135,6 +149,7 @@ export default function App() {
               onNavigate={handleNavigate}
               onOpenSettings={() => setIsSettingsOpen(true)}
               onOpenGrammarChecker={handleOpenGrammarChecker}
+              onOpenMobileMenu={() => setIsMobileNavOpen(true)}
             />
           )}
 
@@ -142,6 +157,8 @@ export default function App() {
             <SpeakScreen
               profile={profile}
               onUpdateProfile={handleUpdateProfile}
+              onConversationStateChange={setIsChatActive}
+              onOpenMobileMenu={() => setIsMobileNavOpen(true)}
             />
           )}
 
@@ -173,8 +190,21 @@ export default function App() {
           )}
         </main>
 
-        {/* Bottom Navigation */}
-        <BottomNav currentTab={currentTab} onSelectTab={handleNavigate} />
+        {/* Bottom Navigation (automatically hidden during active AI chat to prevent overlapping input) */}
+        {!isChatActive && (
+          <BottomNav currentTab={currentTab} onSelectTab={handleNavigate} />
+        )}
+
+        {/* Slide-over Mobile Navigation Drawer */}
+        <MobileNavDrawer
+          isOpen={isMobileNavOpen}
+          onClose={() => setIsMobileNavOpen(false)}
+          currentTab={currentTab}
+          onSelectTab={handleNavigate}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+          onOpenAndroidGuide={() => setIsAndroidGuideOpen(true)}
+          profile={profile}
+        />
 
         {/* Onboarding Flow if not completed */}
         {!profile.onboardingCompleted && (

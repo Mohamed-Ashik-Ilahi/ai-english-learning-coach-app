@@ -96,11 +96,21 @@ export const geminiService = {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 20000);
 
+    const lastUser = [...messages].reverse().find((m) => m.sender === 'user');
+    const latestUserMessage = lastUser?.text || '';
+
     try {
       const res = await fetch(buildApiUrl('/api/gemini/chat'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages, scenario, userLevel, currentMistakes }),
+        body: JSON.stringify({
+          messages,
+          scenario,
+          userLevel,
+          currentMistakes,
+          latestUserMessage,
+          text: latestUserMessage,
+        }),
         signal: controller.signal,
       });
       clearTimeout(timeoutId);

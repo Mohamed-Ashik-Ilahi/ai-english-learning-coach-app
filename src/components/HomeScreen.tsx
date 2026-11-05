@@ -14,6 +14,7 @@ import {
   Play,
   Volume2,
   CheckCheck,
+  Menu,
 } from 'lucide-react';
 import { SpeechService } from '../services/speechService';
 
@@ -23,6 +24,7 @@ interface HomeScreenProps {
   onNavigate: (tab: TabType, extra?: any) => void;
   onOpenSettings: () => void;
   onOpenGrammarChecker: () => void;
+  onOpenMobileMenu?: () => void;
 }
 
 export const HomeScreen: React.FC<HomeScreenProps> = ({
@@ -31,6 +33,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   onNavigate,
   onOpenSettings,
   onOpenGrammarChecker,
+  onOpenMobileMenu,
 }) => {
   // Determine greeting based on current local hour
   const hour = new Date().getHours();
@@ -82,6 +85,17 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           >
             <Settings className="w-4 h-4" />
           </button>
+
+          {/* Mobile Menu drawer toggle */}
+          {onOpenMobileMenu && (
+            <button
+              onClick={onOpenMobileMenu}
+              className="w-9 h-9 rounded-full bg-white border border-slate-200 text-slate-600 flex items-center justify-center hover:bg-slate-50 active:scale-95 transition-all shadow-xs"
+              aria-label="Navigation Menu"
+            >
+              <Menu className="w-4 h-4" />
+            </button>
+          )}
         </div>
       </header>
 

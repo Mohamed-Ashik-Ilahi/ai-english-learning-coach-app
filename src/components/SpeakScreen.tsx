@@ -22,15 +22,23 @@ import {
   Plane,
   ChevronRight,
   TrendingUp,
+  Menu,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
 interface SpeakScreenProps {
   profile: UserProfile;
   onUpdateProfile: () => void;
+  onOpenMobileMenu?: () => void;
+  onConversationStateChange?: (isActive: boolean) => void;
 }
 
-export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfile }) => {
+export const SpeakScreen: React.FC<SpeakScreenProps> = ({
+  profile,
+  onUpdateProfile,
+  onOpenMobileMenu,
+  onConversationStateChange,
+}) => {
   const [selectedScenario, setSelectedScenario] = useState<Scenario | null>(null);
   const [activeCategory, setActiveCategory] = useState<'All' | 'Daily Life' | 'Work' | 'Travel' | 'Social'>('All');
 
@@ -49,6 +57,12 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
   // In-flight guard to prevent duplicate submissions
   const isSubmittingRef = useRef<boolean>(false);
 
+  // Synchronous messages ref to eliminate any stale React state closures
+  const messagesRef = useRef<Message[]>([]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
   // Report modal state
   const [conversationReport, setConversationReport] = useState<ConversationReport | null>(null);
   const [isGeneratingReport, setIsGeneratingReport] = useState<boolean>(false);
@@ -66,16 +80,19 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
   // Start a scenario conversation
   const handleStartScenario = (scenario: Scenario) => {
     setSelectedScenario(scenario);
+    if (onConversationStateChange) onConversationStateChange(true);
     setSessionStartTime(Date.now());
     setConversationReport(null);
+    setChatError(null);
 
     const initialAiMessage: Message = {
-      id: `ai-${Date.now()}`,
+      id: `ai-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       sender: 'model',
       text: scenario.initialMessage,
       timestamp: Date.now(),
     };
 
+    messagesRef.current = [initialAiMessage];
     setMessages([initialAiMessage]);
 
     // Speak initial welcome message
@@ -133,15 +150,20 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
       setIsListening(false);
     }
 
+    const userMessageId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const userMessage: Message = {
-      id: `user-${Date.now()}`,
+      id: userMessageId,
       sender: 'user',
       text,
       timestamp: Date.now(),
     };
 
-    const newMessages = [...messages, userMessage];
+    // Always reference fresh messagesRef to prevent stale React closures
+    const currentList = messagesRef.current;
+    const newMessages = [...currentList, userMessage];
+    messagesRef.current = newMessages;
     setMessages(newMessages);
+
     setInputText('');
     setSpeechTranscript('');
     setChatError(null);
@@ -162,13 +184,25 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
       }
 
       const aiReplyMessage: Message = {
-        id: `ai-${Date.now()}`,
+        id: `ai-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         sender: 'model',
         text: response.reply,
         timestamp: Date.now(),
       };
 
-      setMessages([...newMessages, aiReplyMessage]);
+      setMessages((prev) => {
+        const updated = [...prev];
+        const userMsgIndex = updated.findIndex((m) => m.id === userMessageId);
+        if (userMsgIndex !== -1 && response.hasCorrection && response.correction) {
+          updated[userMsgIndex] = {
+            ...updated[userMsgIndex],
+            correction: response.correction,
+          };
+        }
+        const finalized = [...updated, aiReplyMessage];
+        messagesRef.current = finalized;
+        return finalized;
+      });
 
       // Automatically speak the AI response
       setSpeakingMessageId(aiReplyMessage.id);
@@ -187,7 +221,7 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
       console.warn('[SpeakScreen] Send message failed:', e);
       // Keep conversation intact and display actionable retry option
       setChatError({
-        message: 'Coach Alex is taking longer than usual to respond. Please check your connection.',
+        message: e?.message || 'Coach Alex is taking longer than usual to respond. Please check your connection.',
         failedText: text,
       });
     } finally {
@@ -204,29 +238,37 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
     setIsLoading(true);
 
     try {
+      const currentList = messagesRef.current;
       const response = await geminiService.sendChatMessage(
-        messages,
+        currentList,
         selectedScenario,
         profile.level,
         profile.mistakeHistory
       );
 
-      if (response.hasCorrection && response.correction) {
-        const lastUserMsg = [...messages].reverse().find((m) => m.sender === 'user');
-        if (lastUserMsg) {
-          lastUserMsg.correction = response.correction;
-          recordMistake(response.correction);
-        }
-      }
-
       const aiReplyMessage: Message = {
-        id: `ai-${Date.now()}`,
+        id: `ai-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         sender: 'model',
         text: response.reply,
         timestamp: Date.now(),
       };
 
-      setMessages((prev) => [...prev, aiReplyMessage]);
+      setMessages((prev) => {
+        const updated = [...prev];
+        if (response.hasCorrection && response.correction) {
+          const lastUserIdx = updated.map((m) => m.sender).lastIndexOf('user');
+          if (lastUserIdx !== -1) {
+            updated[lastUserIdx] = {
+              ...updated[lastUserIdx],
+              correction: response.correction,
+            };
+            recordMistake(response.correction);
+          }
+        }
+        const finalized = [...updated, aiReplyMessage];
+        messagesRef.current = finalized;
+        return finalized;
+      });
 
       setSpeakingMessageId(aiReplyMessage.id);
       SpeechService.speak(
@@ -243,7 +285,7 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
     } catch (e: any) {
       console.warn('[SpeakScreen] Retry chat failed:', e);
       setChatError({
-        message: 'Could not connect to Coach Alex. Please tap Retry or verify your network.',
+        message: e?.message || 'Could not connect to Coach Alex. Please tap Retry or verify your network.',
         failedText,
       });
     } finally {
@@ -338,6 +380,7 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
       }
     } else {
       setSelectedScenario(null);
+      if (onConversationStateChange) onConversationStateChange(false);
     }
   };
 
@@ -350,16 +393,27 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
   if (!selectedScenario) {
     return (
       <div className="pb-24 pt-4 px-4 max-w-md mx-auto space-y-5 animate-in fade-in duration-300">
-        <header className="space-y-1">
-          <span className="text-xs font-semibold text-blue-600 tracking-wide uppercase">
-            AI Speaking Practice
-          </span>
-          <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight">
-            Choose a Scenario
-          </h1>
-          <p className="text-xs text-slate-500 leading-relaxed">
-            Select a realistic roleplay situation to practice speaking with your AI teacher.
-          </p>
+        <header className="flex items-start justify-between">
+          <div className="space-y-1 pr-2">
+            <span className="text-xs font-semibold text-blue-600 tracking-wide uppercase">
+              AI Speaking Practice
+            </span>
+            <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight">
+              Choose a Scenario
+            </h1>
+            <p className="text-xs text-slate-500 leading-relaxed">
+              Select a realistic roleplay situation to practice speaking with your AI teacher.
+            </p>
+          </div>
+          {onOpenMobileMenu && (
+            <button
+              onClick={onOpenMobileMenu}
+              className="w-9 h-9 rounded-full bg-white border border-slate-200 text-slate-600 flex items-center justify-center hover:bg-slate-50 active:scale-95 transition-all shadow-xs shrink-0 mt-1"
+              aria-label="Open Navigation Menu"
+            >
+              <Menu className="w-4 h-4" />
+            </button>
+          )}
         </header>
 
         {/* Free Talk Quick Launcher Card */}
@@ -449,37 +503,49 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
 
   // VIEW 2: Conversation Screen
   return (
-    <div className="fixed inset-0 z-40 bg-slate-50 flex flex-col max-w-md mx-auto">
+    <div className="absolute inset-0 z-30 bg-slate-50 flex flex-col h-full w-full max-w-md mx-auto overflow-hidden">
       {/* Top Conversation Header */}
-      <header className="px-4 py-3 bg-white border-b border-slate-100 flex items-center justify-between shadow-xs">
-        <button
-          onClick={handleEndConversation}
-          className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900 p-1.5 -ml-1 rounded-xl active:scale-95"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          <span>Exit</span>
-        </button>
+      <header className="shrink-0 px-3 py-2.5 bg-white border-b border-slate-200/80 flex items-center justify-between shadow-2xs z-10">
+        <div className="flex items-center gap-1">
+          <button
+            onClick={handleEndConversation}
+            className="flex items-center gap-1 text-xs font-semibold text-slate-600 hover:text-slate-900 px-2 py-1.5 rounded-xl hover:bg-slate-100 active:scale-95 transition-colors"
+            title="Exit conversation"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            <span>Exit</span>
+          </button>
+          {onOpenMobileMenu && (
+            <button
+              onClick={onOpenMobileMenu}
+              className="p-1.5 text-slate-600 hover:text-slate-900 rounded-xl hover:bg-slate-100 active:scale-95 transition-colors"
+              aria-label="Open navigation menu"
+            >
+              <Menu className="w-4 h-4" />
+            </button>
+          )}
+        </div>
 
-        <div className="flex flex-col items-center">
+        <div className="flex flex-col items-center max-w-[50%] text-center">
           <div className="flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
             <h2 className="text-sm font-extrabold text-slate-900 tracking-tight">Coach Alex</h2>
           </div>
-          <span className="text-[10px] text-slate-500 font-medium">
+          <span className="text-[10px] text-slate-500 font-medium truncate w-full">
             {selectedScenario.title}
           </span>
         </div>
 
         <button
           onClick={handleEndConversation}
-          className="px-3 py-1 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-xl text-xs font-bold border border-blue-100 active:scale-95"
+          className="px-3 py-1.5 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-xl text-xs font-bold border border-blue-100 active:scale-95 transition-colors"
         >
           Done
         </button>
       </header>
 
       {/* Messages Thread */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
         {messages.map((msg) => {
           const isUser = msg.sender === 'user';
           return (
@@ -680,7 +746,10 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
       )}
 
       {/* Bottom Controls Bar */}
-      <footer className="p-4 bg-white border-t border-slate-100 pb-safe shadow-lg">
+      <footer
+        className="shrink-0 p-3 sm:p-4 bg-white border-t border-slate-200/80 shadow-lg z-20"
+        style={{ paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 12px)' }}
+      >
         {inputMode === 'voice' ? (
           <div className="flex flex-col items-center justify-center space-y-3">
             {/* Large Microphone Button */}
@@ -850,6 +919,7 @@ export const SpeakScreen: React.FC<SpeakScreenProps> = ({ profile, onUpdateProfi
                   onClick={() => {
                     setConversationReport(null);
                     setSelectedScenario(null);
+                    if (onConversationStateChange) onConversationStateChange(false);
                   }}
                   className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl font-bold text-xs active:scale-95 transition-transform"
                 >
